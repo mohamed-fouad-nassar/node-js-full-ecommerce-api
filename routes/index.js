@@ -1,4 +1,5 @@
 import authRoute from "./auth.route.js";
+import productsRoute from "./products.route.js";
 import categoriesRoute from "./categories.route.js";
 
-export { authRoute, categoriesRoute };
+export { authRoute, categoriesRoute, productsRoute };

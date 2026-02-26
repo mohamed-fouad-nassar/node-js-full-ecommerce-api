@@ -1,4 +1,4 @@
-import {Category} from "../models/index.js";
+import {Category, Product} from "../models/index.js";
 import {catchAsync, filterObject, HttpError, httpStatus} from "../utils/index.js";
 
 export const getAllCategories = catchAsync(async (req, res, next) => {
@@ -43,9 +43,10 @@ export const updateCategory = catchAsync(async (req, res, next) => {
 export const deleteCategory = catchAsync(async (req, res, next) => {
     const {id} = req.params;
     const category = await  Category.findById(id);
-    if(!category) return next(new HttpError(4044, httpStatus.FAIL, "Category Not Found"));
+    if(!category) return next(new HttpError(404, httpStatus.FAIL, "Category Not Found"));
 
-    // if there is products in this category stop deleting
+    const productsCount = await Product.countDocuments({category: category._id});
+    if(productsCount > 0) return next(new HttpError(401, httpStatus.FAIL, "Category must be has no products to delete"));
 
     await Category.deleteOne({_id: category._id})
     return res.json({
@@ -70,8 +71,7 @@ export const getCategoryProducts = catchAsync(async (req, res, next) => {
     const category = await Category.findById(id);
     if(!category) return next(new HttpError(404, httpStatus.FAIL, "Category not found"));
 
-    // GET products from db with {categoryId = category._id)
-    const products = [];
+    const products = await Product.find({category: category._id});
     return  res.json({
         status: httpStatus.SUCCESS,
         data: products,
