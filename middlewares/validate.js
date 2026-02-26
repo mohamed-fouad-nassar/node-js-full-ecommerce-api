@@ -1,6 +1,4 @@
-// validation ==> USING express-validator
-
-import httpStatus from "../utils/http-status.js";
+import { httpStatus } from "../utils/index.js";
 import { validationResult } from "express-validator";
 
 export default (req, res, next) => {
@@ -12,6 +10,7 @@ export default (req, res, next) => {
     // console.log("ERRORS:", errors.array());
     return res.status(400).json({
       status: httpStatus.ERROR,
+      message: "Data Validation Error",
       data: { errors: errors.array().map((err) => err.msg) },
     });
   }

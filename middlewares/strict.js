@@ -1,4 +1,4 @@
-import httpStatus from "../utils/http-status.js";
+import { httpStatus } from "../utils/index.js";
 
 export default (...roles) =>
   (req, res, next) => {

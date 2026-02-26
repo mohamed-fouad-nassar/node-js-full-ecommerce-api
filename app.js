@@ -4,6 +4,7 @@ import express from "express";
 import cookieParser from "cookie-parser";
 
 import { notFound, error } from "./middlewares/index.js";
+import { authRoute, categoriesRoute } from "./routes/index.js";
 
 const app = express();
 
@@ -14,6 +15,8 @@ app.use(express.json());
 app.use(cookieParser());
 
 // Routes
+app.use("/api/auth", authRoute);
+app.use("/api/categories", categoriesRoute);
 
 // Error and Not Found Middlewares
 app.use(notFound);
