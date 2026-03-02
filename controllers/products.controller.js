@@ -2,7 +2,11 @@ import {Product} from "../models/index.js";
 import {catchAsync, filterObject, HttpError, httpStatus} from "../utils/index.js";
 
 export const getAllProducts = catchAsync(async (req, res, next) => {
-    const products = await Product.find();
+    const page = +req.query.page || 1;
+    const limit = +req.query.limit || 10;
+    const skip = (page - 1) * limit;
+
+    const products = await Product.find().skip(skip).limit(limit);
     return res.json({
         status: httpStatus.SUCCESS,
         data: products

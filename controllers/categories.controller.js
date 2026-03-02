@@ -6,7 +6,7 @@ export const getAllCategories = catchAsync(async (req, res, next) => {
     return res.json({
         status: httpStatus.SUCCESS,
         data: categories,
-    })
+    });
 })
 
 export const createNewCategory = catchAsync(async (req, res, next) => {
@@ -22,7 +22,7 @@ export const createNewCategory = catchAsync(async (req, res, next) => {
         status: httpStatus.SUCCESS,
         message: "Category created successfully",
         data: category,
-    })
+    });
 })
 
 export const updateCategory = catchAsync(async (req, res, next) => {
