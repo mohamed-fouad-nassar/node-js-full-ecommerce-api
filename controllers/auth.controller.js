@@ -7,11 +7,9 @@ export const loginUser = catchAsync(async (req, res, next) => {
   const { email, password } = req.body;
 
   const user = await User.findOne({ email });
-  console.log("user: ", user)
   if (!user) return next(new HttpError(404, httpStatus.FAIL, "Invalid credentials"));
 
   const isValid = await user.comparePassword(password);
-  console.log("isValid: ", isValid)
   if (!isValid)
     return next(new HttpError(401, httpStatus.FAIL, "Invalid credentials"));
 
