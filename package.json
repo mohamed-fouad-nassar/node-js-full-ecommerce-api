@@ -1,29 +1,44 @@
 {
-  "name": "express-api-template",
+  "name": "node-js-full-ecommerce-api",
   "version": "1.0.0",
-  "description": "",
+  "description": "E-commerce REST API built with Node.js, Express and MongoDB",
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
-  "keywords": [],
+  "keywords": [
+    "ecommerce",
+    "express",
+    "mongodb",
+    "mongoose",
+    "api"
+  ],
   "author": "",
   "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mohamed-fouad-nassar/node-js-full-ecommerce-api.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
+    "dotenv": "^17.2.4",
     "express": "^5.2.1",
     "express-validator": "^7.3.1",
     "jsonwebtoken": "^9.0.3",
-    "mongoose": "^9.2.0"
+    "mongoose": "^9.2.0",
+    "morgan": "^1.10.1",
+    "swagger-ui-express": "^5.0.1",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
-    "dotenv": "^17.2.4",
-    "morgan": "^1.10.1",
     "nodemon": "^3.1.11"
   }
 }

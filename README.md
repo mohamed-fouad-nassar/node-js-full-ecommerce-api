@@ -2,6 +2,36 @@
 
 A REST API for an e-commerce backend, built with **Node.js**, **Express 5** and **MongoDB**. It covers authentication, a products & categories catalog, a per-user shopping cart with stock checks, and transactional order processing.
 
+## 📖 API Documentation
+
+Interactive Swagger UI is served by the app itself — no extra tooling, no separate
+docs site to keep in sync:
+
+```
+http://localhost:3000/api-docs
+```
+
+All **30 endpoints** are documented across 5 groups (Auth, Products, Categories,
+Cart, Orders), each with its request body, every success code, and every error
+code with the exact message the server returns.
+
+| Resource | Link |
+| --- | --- |
+| Swagger UI | [`/api-docs`](http://localhost:3000/api-docs) |
+| Raw OpenAPI spec | [`/api-docs/openapi.json`](http://localhost:3000/api-docs/openapi.json) |
+| Spec source | [`docs/openapi.yaml`](docs/openapi.yaml) |
+
+The spec is standard **OpenAPI 3.0.3** with no extensions, so it can be imported
+straight into Postman, Insomnia, or any OpenAPI client:
+
+```bash
+npx openapi-generator-cli generate -i http://localhost:3000/api-docs/openapi.json -g typescript-fetch -o ./client
+```
+
+Use the **Authorize** button to paste an access token (from
+`POST /api/auth/login`) and unlock the admin endpoints. Authorizations persist
+across reloads.
+
 📖 **[Full request & response examples →](docs/API_RESPONSES.md)**
 
 ---
@@ -19,6 +49,7 @@ A REST API for an e-commerce backend, built with **Node.js**, **Express 5** and 
 | Validation | `express-validator` `^7.3.1` |
 | CORS | `cors` `^2.8.6` |
 | Cookies | `cookie-parser` `^1.4.7` |
+| API docs | `swagger-ui-express` `^5.0.1` — Swagger UI at `/api-docs` |
 | Environment | `dotenv` `^17.2.4` |
 | Logging | `morgan` `^1.10.1` |
 | Dev server | `nodemon` `^3.1.11` |
@@ -31,6 +62,10 @@ A REST API for an e-commerce backend, built with **Node.js**, **Express 5** and 
 .
 ├── app.js                        # Express app assembly
 ├── server.js                     # Entry point: dotenv → connectDB → listen
+│
+├── docs/
+│   ├── openapi.yaml                # OpenAPI 3.0.3 spec, served at /api-docs
+│   └── API_RESPONSES.md            # Request & response examples
 │
 ├── config/
 │   └── database.js               # MongoDB connection
@@ -132,11 +167,20 @@ npm run dev     # development, with nodemon
 npm start       # production
 ```
 
+### 5. Open the docs
+
+```
+http://localhost:3000/api-docs
+```
+
+The docs load whether or not MongoDB is reachable, so you can browse the spec
+before wiring up a database.
+
 ---
 
 ## API Conventions
 
-**Base URL:** `http://localhost:3000/api`
+**Base URL:** `http://localhost:3000/api` (Swagger UI is mounted separately at `/api-docs`)
 
 Authenticated endpoints need the header `Authorization: Bearer <accessToken>`.
 

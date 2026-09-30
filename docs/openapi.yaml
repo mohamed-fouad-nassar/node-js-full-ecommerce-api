@@ -1,0 +1,1520 @@
+openapi: 3.0.3
+
+info:
+  title: E-commerce REST API
+  version: 1.0.0
+  description: |
+    REST API for an e-commerce backend — authentication, product and category
+    catalog, a per-user shopping cart with stock enforcement, and transactional
+    order processing.
+
+    ### Authentication
+    Authenticate with `POST /api/auth/login`. The access token is returned in the
+    response body and must be sent on every subsequent request as:
+
+    ```
+    Authorization: Bearer <accessToken>
+    ```
+
+    A rotating refresh token is issued as an `httpOnly` cookie named
+    `refreshToken`. Refresh tokens rotate on every use; replaying a
+    previously-consumed token returns `401 Token reuse detected`.
+
+    ### Access levels
+    | Level | Meaning |
+    | --- | --- |
+    | Public | No token required |
+    | User | Any authenticated user |
+    | Admin | `role: "admin"` |
+
+    ### Response envelope
+    Every response uses one of three shapes.
+
+    Success
+    ```json
+    { "status": "success", "message": "...", "data": { } }
+    ```
+
+    Error
+    ```json
+    { "status": "fail", "message": "Product not found" }
+    ```
+
+    Validation error — all failing rules are collected
+    ```json
+    {
+      "status": "error",
+      "message": "Data Validation Error",
+      "data": { "errors": ["...", "..."] }
+    }
+    ```
+
+    ### Notes
+    * Order endpoints run inside MongoDB multi-document transactions, so the
+      database must be a replica set or sharded cluster.
+    * `POST /api/orders` reads prices from the database — clients cannot set them.
+    * Cart item endpoints take their payload in the request body, including `DELETE`.
+servers:
+  - url: /api
+    description: Current host
+
+tags:
+  - name: Auth
+    description: Registration, login, token refresh and logout
+  - name: Products
+    description: Product catalog management
+  - name: Categories
+    description: Category management
+  - name: Cart
+    description: Per-user shopping cart
+  - name: Orders
+    description: Order placement and status management
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user
+      description: Creates an account with the default `user` role. No token is returned.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: User registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: User registered successfully }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          description: Email or username already registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                status: fail
+                message: User already exists
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      description: >
+        Authenticates with email and password. Returns the access token in the body
+        and sets the `refreshToken` cookie.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Logged in successfully
+          headers:
+            Set-Cookie:
+              description: >-
+                refreshToken — httpOnly, secure, SameSite=None, 15 day max age.
+                Secure means it is only sent over HTTPS.
+              schema:
+                type: string
+                example: refreshToken=eyJhbGciOiJIUzI1NiIs...; Max-Age=1296000; Path=/; HttpOnly; Secure; SameSite=None
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          description: Wrong password
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                status: fail
+                message: Invalid credentials
+        '404':
+          description: No account with that email
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                status: fail
+                message: Invalid credentials
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh the token pair
+      description: >
+        Issues a new access token and rotates the refresh token. Requires the
+        `refreshToken` cookie, which browsers send automatically.
+      security:
+        - refreshCookie: []
+      responses:
+        '200':
+          description: New token pair issued
+          headers:
+            Set-Cookie:
+              description: The previous refresh token is invalidated by this response.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Missing cookie, invalid token, or a previously-used refresh token was replayed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                noCookie:
+                  summary: No cookie sent
+                  value: { status: fail, message: You need to login first }
+                badToken:
+                  summary: Bad signature or expired
+                  value: { status: error, message: Error in refresh token }
+                userMissing:
+                  summary: User no longer exists
+                  value: { status: fail, message: Invalid refresh token }
+                reuse:
+                  summary: Replay of an already-rotated token
+                  value: { status: fail, message: Token reuse detected }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out
+      description: Nulls the stored refresh token hash and clears the cookie.
+      responses:
+        '204':
+          description: Logged out. Empty body.
+        '401':
+          description: Access token missing or invalid, or the refresh cookie is absent
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                noCookie:
+                  summary: No refresh cookie
+                  value: { status: fail, message: You need to login first }
+                noToken:
+                  summary: No access token
+                  value: { status: fail, message: No token provided }
+
+  /products:
+    get:
+      tags: [Products]
+      summary: List products
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: A page of products
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Product' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Products]
+      summary: Create a product
+      description: Admin only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProductRequest'
+      responses:
+        '201':
+          description: Product created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Product created successfully }
+                  data: { $ref: '#/components/schemas/Product' }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /products/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdParam'
+    get:
+      tags: [Products]
+      summary: Get a product
+      responses:
+        '200':
+          description: The product
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data: { $ref: '#/components/schemas/Product' }
+        '400':
+          description: The id is not a valid MongoDB ObjectId
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ProductNotFound'
+    patch:
+      tags: [Products]
+      summary: Update a product
+      description: >
+        Admin only. Every field is optional but at least one must be supplied.
+        Only the fields listed in the schema are applied; any other key is ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProductRequest'
+      responses:
+        '200':
+          description: Product updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Product updated successfully }
+                  data: { $ref: '#/components/schemas/Product' }
+        '400':
+          description: Empty body, or a field failed validation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+              examples:
+                emptyBody:
+                  summary: No fields supplied
+                  value:
+                    status: error
+                    message: Data Validation Error
+                    data:
+                      errors: [No Data Provided, at least one field is required]
+                invalidField:
+                  summary: Invalid price
+                  value:
+                    status: error
+                    message: Data Validation Error
+                    data:
+                      errors: [Price must be a number ≥ 0]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ProductNotFound'
+    delete:
+      tags: [Products]
+      summary: Delete a product
+      description: Admin only.
+      responses:
+        '200':
+          description: Product deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Product deleted successfully }
+        '400':
+          description: The id is not a valid MongoDB ObjectId
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ProductNotFound'
+
+  /categories:
+    get:
+      tags: [Categories]
+      summary: List categories
+      responses:
+        '200':
+          description: All categories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Category' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Categories]
+      summary: Create a category
+      description: Admin only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCategoryRequest'
+      responses:
+        '201':
+          description: Category created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Category created successfully }
+                  data: { $ref: '#/components/schemas/Category' }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          description: Access token missing or invalid, or the name is already taken
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                noToken:
+                  summary: No access token
+                  value: { status: fail, message: No token provided }
+                duplicate:
+                  summary: Name already exists
+                  value: { status: fail, message: Category is already exists }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /categories/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdParam'
+    get:
+      tags: [Categories]
+      summary: Get a category
+      responses:
+        '200':
+          description: The category
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data: { $ref: '#/components/schemas/Category' }
+        '400':
+          description: The id is not a valid MongoDB ObjectId
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/CategoryNotFound'
+    patch:
+      tags: [Categories]
+      summary: Update a category
+      description: >
+        Admin only. `name` and `description` are optional, but at least one
+        must be supplied. Only these two fields are applied.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCategoryRequest'
+      responses:
+        '200':
+          description: Category updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Category updated successfully }
+                  data: { $ref: '#/components/schemas/Category' }
+        '400':
+          description: Empty body, or a field failed validation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+              examples:
+                emptyBody:
+                  summary: No fields supplied
+                  value:
+                    status: error
+                    message: Data Validation Error
+                    data:
+                      errors: [No Data Provided, at least one field is required]
+                invalidField:
+                  summary: Name too short
+                  value:
+                    status: error
+                    message: Data Validation Error
+                    data:
+                      errors: [Name must be between 3 and 20 characters long]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CategoryNotFound'
+    delete:
+      tags: [Categories]
+      summary: Delete a category
+      description: Admin only. Succeeds only when the category owns no products.
+      responses:
+        '200':
+          description: Category deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Category deleted successfully }
+        '400':
+          description: The id is not a valid MongoDB ObjectId
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+        '401':
+          description: Access token missing or invalid, or the category still has products
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                noToken:
+                  summary: No access token
+                  value: { status: fail, message: No token provided }
+                hasProducts:
+                  summary: Category still owns products
+                  value:
+                    status: fail
+                    message: Category must be has no products to delete
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No category with that id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { status: fail, message: Category Not Found }
+
+  /categories/{id}/products:
+    parameters:
+      - $ref: '#/components/parameters/IdParam'
+    get:
+      tags: [Categories]
+      summary: List a category's products
+      responses:
+        '200':
+          description: Products in that category
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Product' }
+        '400':
+          description: The id is not a valid MongoDB ObjectId
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/CategoryNotFound'
+
+  /cart:
+    get:
+      tags: [Cart]
+      summary: Get your cart
+      parameters:
+        - name: expand
+          in: query
+          required: false
+          description: Set to `products` to populate `items.productId` with full product documents.
+          schema:
+            type: string
+            enum: [products]
+      responses:
+        '200':
+          description: Your cart
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data: { $ref: '#/components/schemas/Cart' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/CartNotFound'
+    delete:
+      tags: [Cart]
+      summary: Empty your cart
+      description: Removes every item but keeps the cart document.
+      responses:
+        '200':
+          description: Cart emptied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Cart cleared successfully }
+                  data: { $ref: '#/components/schemas/Cart' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/CartNotFound'
+
+  /cart/items:
+    post:
+      tags: [Cart]
+      summary: Add a product to your cart
+      description: >
+        Creates the cart if it does not exist yet. If the product is already in the
+        cart the quantities are summed. Stock is checked against the result.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CartItemRequest'
+      responses:
+        '201':
+          description: Product added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Product added successfully }
+                  data: { $ref: '#/components/schemas/Cart' }
+        '400':
+          description: Validation failed, or not enough stock
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/ValidationError'
+              examples:
+                stockExceeded:
+                  summary: Not enough stock
+                  value: { status: fail, message: Product stock exceeded }
+                invalidBody:
+                  summary: Invalid qty
+                  value:
+                    status: error
+                    message: Data Validation Error
+                    data:
+                      errors: [Quantity must be a positive integer]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No product with that id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { status: fail, message: Product not found }
+    patch:
+      tags: [Cart]
+      summary: Set a product's quantity
+      description: Sets the absolute quantity, not a delta. The product must already be in the cart.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CartItemRequest'
+      responses:
+        '200':
+          description: Quantity updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Cart updated successfully }
+                  data: { $ref: '#/components/schemas/Cart' }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No cart yet, or the product is not in it
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                noCart:
+                  summary: No cart
+                  value: { status: fail, message: Cart not found }
+                notInCart:
+                  summary: Product not in cart
+                  value: { status: fail, message: Product not in cart }
+    delete:
+      tags: [Cart]
+      summary: Remove a product from your cart
+      description: Takes the product id in the request body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CartProductRequest'
+      responses:
+        '200':
+          description: Item removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Cart item removed successfully }
+                  data: { $ref: '#/components/schemas/Cart' }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No cart yet, or the product is not in it
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                noCart:
+                  summary: No cart
+                  value: { status: fail, message: Cart not found }
+                notInCart:
+                  summary: Product not in cart
+                  value: { status: fail, message: Product not in cart }
+
+  /cart/items/decrease:
+    post:
+      tags: [Cart]
+      summary: Decrease a product's quantity
+      description: If the result is zero or less the line item is removed entirely.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CartItemRequest'
+      responses:
+        '200':
+          description: Quantity decreased
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Cart item quantity decreased successfully }
+                  data: { $ref: '#/components/schemas/Cart' }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No cart yet, or the product is not in it
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                noCart:
+                  summary: No cart
+                  value: { status: fail, message: Cart not found }
+                notInCart:
+                  summary: Product not in cart
+                  value: { status: fail, message: Product not in cart }
+
+  /cart/admin:
+    get:
+      tags: [Cart]
+      summary: List every cart
+      description: Admin only. Returns carts for all users. The `user` field is not populated.
+      responses:
+        '200':
+          description: All carts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Cart' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /cart/admin/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The **user** id, not the cart id.
+        schema:
+          type: string
+          pattern: '^[0-9a-fA-F]{24}$'
+          example: 6a1f2b3c4d5e6f7a8b9c0d1e
+    get:
+      tags: [Cart]
+      summary: Get a user's cart
+      description: Admin only. Populates the `user` field.
+      responses:
+        '200':
+          description: The user's cart
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data: { $ref: '#/components/schemas/CartWithUser' }
+        '400':
+          description: The id is not a valid MongoDB ObjectId
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CartNotFound'
+
+  /orders:
+    get:
+      tags: [Orders]
+      summary: List your orders
+      responses:
+        '200':
+          description: Your orders. Empty array when you have none.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Order' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Orders]
+      summary: Place an order
+      description: >
+        Runs inside a database transaction. Prices are read from the database, so
+        clients cannot set them — each line item stores a price snapshot taken at
+        purchase time. Stock is decremented atomically for every item.
+        New orders always start at `pending`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Order created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Order created successfully }
+                  data: { $ref: '#/components/schemas/Order' }
+        '400':
+          description: Validation failed, insufficient stock, or a discount that drives the total below zero
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/ValidationError'
+              examples:
+                insufficientStock:
+                  summary: Not enough stock
+                  value:
+                    status: fail
+                    message: Insufficient stock for Wireless Headphones
+                invalidBody:
+                  summary: Empty items array
+                  value:
+                    status: error
+                    message: Data Validation Error
+                    data:
+                      errors: [Items must be a non-empty array between 1 and 20 items max]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: One of the products does not exist
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { status: fail, message: Product not found }
+
+  /orders/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdParam'
+    get:
+      tags: [Orders]
+      summary: Get one of your orders
+      description: Returns the order only if you own it.
+      responses:
+        '200':
+          description: The order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data: { $ref: '#/components/schemas/Order' }
+        '400':
+          description: The id is not a valid MongoDB ObjectId
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: The order belongs to another user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                status: fail
+                message: You don't have permission to access this order
+        '404':
+          $ref: '#/components/responses/OrderNotFound'
+    patch:
+      tags: [Orders]
+      summary: Change an order's status
+      description: >
+        Admin only. Setting the status to the value the order already holds is
+        rejected. Setting it to `cancelled` restores product stock.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOrderStatusRequest'
+      responses:
+        '200':
+          description: Order updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Order updated successfully }
+                  data: { $ref: '#/components/schemas/Order' }
+        '400':
+          description: Invalid status, unchanged status, or the order is already cancelled or delivered
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/ValidationError'
+              examples:
+                invalidStatus:
+                  summary: Value outside the enum
+                  value:
+                    status: error
+                    message: Data Validation Error
+                    data:
+                      errors:
+                        - 'Invalid order status. it must be one of these [pending, confirmed, paid, processing, shipped, delivered, cancelled]'
+                unchanged:
+                  summary: Status already set to this value
+                  value: { status: fail, message: order status is already shipped }
+                alreadyCancelled:
+                  summary: Order already cancelled
+                  value:
+                    status: fail
+                    message: Order is already cancelled, you can't activate it again
+                alreadyDelivered:
+                  summary: Order already delivered
+                  value:
+                    status: fail
+                    message: Order is already delivered, you can't update status again
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/OrderNotFound'
+
+  /orders/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/IdParam'
+    patch:
+      tags: [Orders]
+      summary: Cancel one of your orders
+      description: >
+        Cancels the order and restores the stock of every item, in a transaction.
+        An order that is already `cancelled` or `delivered` cannot be cancelled again.
+      responses:
+        '200':
+          description: Order cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  message: { type: string, example: Order updated successfully }
+                  data: { $ref: '#/components/schemas/Order' }
+        '400':
+          description: The id is not a valid MongoDB ObjectId, or the order is already cancelled or delivered
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/ValidationError'
+              examples:
+                alreadyCancelled:
+                  summary: Order already cancelled
+                  value:
+                    status: fail
+                    message: Order is already cancelled, you can't activate it again
+                alreadyDelivered:
+                  summary: Order already delivered
+                  value:
+                    status: fail
+                    message: Order is already delivered, you can't update status again
+                invalidId:
+                  summary: Malformed id
+                  value:
+                    status: error
+                    message: Data Validation Error
+                    data:
+                      errors: [id must be a valid MongoDB ObjectId]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No order with that id, or one of its products has been deleted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                noOrder:
+                  summary: Order not found
+                  value: { status: fail, message: Order not found }
+                noProduct:
+                  summary: A product was deleted after the order was placed
+                  value: { status: fail, message: Product not found }
+
+  /orders/admin:
+    get:
+      tags: [Orders]
+      summary: List every order
+      description: Admin only. Returns orders across all users.
+      responses:
+        '200':
+          description: All orders
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Order' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /orders/admin/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The **user** id, not the order id.
+        schema:
+          type: string
+          pattern: '^[0-9a-fA-F]{24}$'
+          example: 6a1f2b3c4d5e6f7a8b9c0d1e
+    get:
+      tags: [Orders]
+      summary: List a user's orders
+      description: >
+        Admin only. Populates the `user` field, with `password` and `refreshToken`
+        excluded.
+      responses:
+        '200':
+          description: That user's orders
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/OrderWithUser' }
+        '400':
+          description: The id is not a valid MongoDB ObjectId
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        The access token returned by `POST /api/auth/login`. Paste it here without
+        the `Bearer ` prefix.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: refreshToken
+      description: >
+        Set automatically by `POST /api/auth/login` and rotated by
+        `POST /api/auth/refresh`. Browsers send it on same-origin requests.
+
+  parameters:
+    IdParam:
+      name: id
+      in: path
+      required: true
+      description: MongoDB ObjectId
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{24}$'
+        example: 6a1e2b3c4d5e6f7a8b9c0d1e
+    PageParam:
+      name: page
+      in: query
+      required: false
+      description: Page number
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      description: Items per page
+      schema:
+        type: integer
+        minimum: 1
+        default: 10
+
+  responses:
+    Unauthorized:
+      description: Access token missing, invalid, or expired
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            noToken:
+              summary: No Authorization header
+              value: { status: fail, message: No token provided }
+            badToken:
+              summary: Invalid or expired token
+              value: { status: error, message: Error in authentication, Invalid token }
+    Forbidden:
+      description: Authenticated but the role is insufficient
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            status: fail
+            message: You do not have permission to perform this action
+    ValidationFailed:
+      description: One or more request fields failed validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ValidationError' }
+          examples:
+            missingFields:
+              summary: Required fields absent
+              value:
+                status: error
+                message: Data Validation Error
+                data:
+                  errors: [Name is required, Price is required]
+    ProductNotFound:
+      description: No product with that id
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { status: fail, message: Product not found }
+    CategoryNotFound:
+      description: No category with that id
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { status: fail, message: Category not found }
+    CartNotFound:
+      description: The cart does not exist yet
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { status: fail, message: Cart not found }
+    OrderNotFound:
+      description: No order with that id
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { status: fail, message: Order not found }
+
+  schemas:
+    Error:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: string
+          enum: [fail, error]
+          example: fail
+        message:
+          type: string
+          example: Product not found
+
+    ValidationError:
+      type: object
+      required: [status, message, data]
+      properties:
+        status:
+          type: string
+          enum: [error]
+          example: error
+        message:
+          type: string
+          example: Data Validation Error
+        data:
+          type: object
+          properties:
+            errors:
+              type: array
+              description: One message per failing rule
+              items: { type: string }
+              example: ['Name is required', 'Price must be a number ≥ 0']
+
+    User:
+      type: object
+      properties:
+        id: { type: string, example: 6a1f2b3c4d5e6f7a8b9c0d1e }
+        username: { type: string, example: nassar }
+        email: { type: string, format: email, example: you@mail.com }
+        role:
+          type: string
+          enum: [user, admin]
+          example: user
+
+    AuthResponse:
+      type: object
+      properties:
+        status: { type: string, example: success }
+        message: { type: string, example: User logged in successfully }
+        data:
+          type: object
+          properties:
+            token:
+              type: string
+              description: 'Access token. Send as `Authorization: Bearer <token>`.'
+              example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+            user: { $ref: '#/components/schemas/User' }
+
+    TokenResponse:
+      type: object
+      properties:
+        status: { type: string, example: success }
+        message: { type: string, example: Token has updated been successfully }
+        data:
+          type: object
+          properties:
+            token:
+              type: string
+              example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+    Category:
+      type: object
+      properties:
+        _id: { type: string, example: 6a1c2b3c4d5e6f7a8b9c0d1e }
+        name: { type: string, minLength: 3, maxLength: 20, example: Electronics }
+        description: { type: string, minLength: 3, maxLength: 400, example: Phones, laptops and audio. }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Product:
+      type: object
+      properties:
+        _id: { type: string, example: 6a1e2b3c4d5e6f7a8b9c0d1e }
+        name: { type: string, minLength: 3, maxLength: 50, example: Wireless Headphones }
+        description: { type: string, minLength: 3, maxLength: 500, example: Over-ear, 30h battery. }
+        price: { type: number, format: float, minimum: 0, example: 199.99 }
+        stock: { type: integer, minimum: 0, example: 42 }
+        image:
+          type: string
+          description: Image URL or path. There is no upload endpoint — this is a plain string.
+          example: https://cdn.example.com/headphones.jpg
+        category: { type: string, description: Category ObjectId, example: 6a1c2b3c4d5e6f7a8b9c0d1e }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CartItem:
+      type: object
+      properties:
+        productId:
+          description: >
+            A bare ObjectId, or the full product when the request used
+            `?expand=products`.
+          oneOf:
+            - { type: string, example: 6a1e2b3c4d5e6f7a8b9c0d1e }
+            - { $ref: '#/components/schemas/Product' }
+        qty: { type: integer, minimum: 1, example: 2 }
+
+    Cart:
+      type: object
+      properties:
+        _id: { type: string, example: 6a202b3c4d5e6f7a8b9c0d1e }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/CartItem' }
+        user: { type: string, description: User ObjectId, example: 6a1f2b3c4d5e6f7a8b9c0d1e }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CartWithUser:
+      allOf:
+        - $ref: '#/components/schemas/Cart'
+        - type: object
+          properties:
+            user: { $ref: '#/components/schemas/User' }
+
+    OrderItem:
+      type: object
+      properties:
+        productId: { type: string, example: 6a1e2b3c4d5e6f7a8b9c0d1e }
+        qty: { type: integer, minimum: 1, maximum: 20, example: 2 }
+        price:
+          type: number
+          format: float
+          minimum: 1
+          description: Price snapshot taken when the order was placed.
+          example: 199.99
+
+    Order:
+      type: object
+      properties:
+        _id: { type: string, example: 6a302b3c4d5e6f7a8b9c0d1e }
+        user: { type: string, description: User ObjectId, example: 6a1f2b3c4d5e6f7a8b9c0d1e }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderItem' }
+        subtotal: { type: number, format: float, minimum: 0, example: 399.98 }
+        discount: { type: number, format: float, minimum: 0, example: 20 }
+        total:
+          type: number
+          format: float
+          minimum: 0
+          description: Always `subtotal - discount`.
+          example: 379.98
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    OrderWithUser:
+      allOf:
+        - $ref: '#/components/schemas/Order'
+        - type: object
+          properties:
+            user: { $ref: '#/components/schemas/User' }
+
+    OrderStatus:
+      type: string
+      description: >
+        Order lifecycle: `pending` → `confirmed` → `paid` → `processing` →
+        `shipped` → `delivered`. Any active order may also move to `cancelled`,
+        which restores stock. `delivered` and `cancelled` are final.
+      enum:
+        - pending
+        - confirmed
+        - paid
+        - processing
+        - shipped
+        - delivered
+        - cancelled
+
+    RegisterRequest:
+      type: object
+      required: [username, email, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 20
+          example: nassar
+        email:
+          type: string
+          format: email
+          maxLength: 50
+          example: you@mail.com
+        password:
+          type: string
+          format: password
+          minLength: 8
+          example: supersecret123
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: you@mail.com
+        password:
+          type: string
+          format: password
+          minLength: 8
+          example: supersecret123
+
+    CreateProductRequest:
+      type: object
+      required: [name, description, price, stock, image, category]
+      properties:
+        name: { type: string, minLength: 3, maxLength: 50, example: Wireless Headphones }
+        description: { type: string, minLength: 3, maxLength: 500, example: Over-ear, 30h battery. }
+        price: { type: number, format: float, minimum: 0, example: 199.99 }
+        stock: { type: integer, minimum: 0, example: 42 }
+        image: { type: string, example: https://cdn.example.com/headphones.jpg }
+        category: { type: string, pattern: '^[0-9a-fA-F]{24}$', example: 6a1c2b3c4d5e6f7a8b9c0d1e }
+
+    UpdateProductRequest:
+      type: object
+      description: At least one field is required. Unlisted keys are ignored.
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 3, maxLength: 50, example: Wireless Headphones }
+        description: { type: string, minLength: 3, maxLength: 500, example: Over-ear, 30h battery. }
+        price: { type: number, format: float, minimum: 0, example: 149.99 }
+        stock: { type: integer, minimum: 0, example: 60 }
+        image: { type: string, example: https://cdn.example.com/headphones-v2.jpg }
+        category: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+
+    CreateCategoryRequest:
+      type: object
+      required: [name, description]
+      properties:
+        name: { type: string, minLength: 3, maxLength: 20, example: Electronics }
+        description: { type: string, minLength: 3, maxLength: 400, example: Phones, laptops and audio. }
+
+    UpdateCategoryRequest:
+      type: object
+      description: At least one field is required. Only these two keys are applied.
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 3, maxLength: 20, example: Electronics & Gadgets }
+        description: { type: string, minLength: 3, maxLength: 400, example: Phones, laptops and audio. }
+
+    CartItemRequest:
+      type: object
+      required: [productId, qty]
+      properties:
+        productId: { type: string, pattern: '^[0-9a-fA-F]{24}$', example: 6a1e2b3c4d5e6f7a8b9c0d1e }
+        qty: { type: integer, minimum: 1, example: 2 }
+
+    CartProductRequest:
+      type: object
+      required: [productId]
+      properties:
+        productId: { type: string, pattern: '^[0-9a-fA-F]{24}$', example: 6a1e2b3c4d5e6f7a8b9c0d1e }
+
+    CreateOrderRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: object
+            required: [productId, qty]
+            properties:
+              productId: { type: string, pattern: '^[0-9a-fA-F]{24}$', example: 6a1e2b3c4d5e6f7a8b9c0d1e }
+              qty: { type: integer, minimum: 1, maximum: 20, example: 2 }
+        discount:
+          type: number
+          format: float
+          minimum: 0
+          default: 0
+          description: >
+            Applied as `total = subtotal - discount`. Accepted verbatim from the
+            client with no server-side cap.
+
+    UpdateOrderStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status: { $ref: '#/components/schemas/OrderStatus' }
