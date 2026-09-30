@@ -286,9 +286,3 @@ pending → confirmed → paid → processing → shipped → delivered
 ```
 
 `delivered` and `cancelled` are final — an order in either state cannot be changed or cancelled again.
-
----
-
-## License
-
-ISC
